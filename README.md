@@ -67,3 +67,7 @@ node --test test/*.test.mjs
 ## 重要提醒
 
 **不要把这个项目放回 `D:\a\dsh\`** —— 那是 DSH 安装目录，electron-builder 更新时会整体替换并删除非清单文件，这正是本次数据丢失的原因。建议放在独立目录并纳入 git。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 ii33

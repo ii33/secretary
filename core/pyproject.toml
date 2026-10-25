@@ -8,6 +8,7 @@ version = "0.5.12-m6"
 description = "Project memory core for the executive secretary (M1–M4)"
 requires-python = ">=3.11"
 dependencies = []
+license = { text = "MIT" }
 
 [project.scripts]
 secretary-core = "secretary_core.cli:main"
