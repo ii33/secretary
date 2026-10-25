@@ -1,0 +1,32 @@
+{
+  "name": "@local/dsh-office",
+  "version": "0.5.12-m6",
+  "description": "Executive secretary host adapter for DSH (project memory + console)",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./tools": "./tools.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": [
+        "./cordis.patch.yml"
+      ]
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "peerDependencies": {
+    "react": "*"
+  }
+}

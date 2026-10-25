@@ -1,0 +1,113 @@
+# @local/dsh-office —— 秘书办公室 bundle 补丁
+#
+# 两件事：
+#   1. 宿主行 `office-core`：启动/复用 Python 核心（secretary-core），注册 `/office-console/api`
+#      白名单代理（由 index.js 里的 registerConsoleRoutes 挂到 webServer 上）。
+#   2. 四个角色预设：secretary / advisor / gm / dm —— 各自只挂对应角色的工具
+#      （`@local/dsh-office/tools`，config.role 决定工具集）。
+#
+# 契约来源：plugin/test/*.test.mjs（原文件）、docs/v1-spec.md。
+# 注意：dataDir 与 coreDir 用正斜杠绝对路径；不要放进 D:\a\dsh（安装目录更新会被清空）。
+- insert:
+    - id: office-core
+      name: '@local/dsh-office'
+      config:
+        coreDir: 'D:/secretary-office/core'
+        dataDir: 'C:/Users/sakuay/.secretary-office'
+        python: 'C:/Users/sakuay/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe'
+
+    - id: preset-secretary
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: secretary
+        name: 秘书
+        description: 执行秘书：项目记忆 + 任务板 + 约定
+        order: 30
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              complete: false
+              includeRuntimeContext: true
+              prefix: |
+                你是项目执行秘书。**先查记忆再行动**：memory_brief 看项目简报，memory_search 查历史，memory_recent 看最近发生了什么。
+
+                纪律：
+                1. 回答前先检索项目记忆；引用既有事实，不要凭空编造。
+                2. 任务与约定用 taskboard_* / convention_* 维护，不要只在聊天里记。
+                3. 值得长期保留的结论用 memory_note 落一条（N- 前缀）。
+                4. 拿不准的项目归属先问用户，不要自己拍板。
+          - id: office-tools
+            name: '@local/dsh-office/tools'
+            config:
+              dataDir: 'C:/Users/sakuay/.secretary-office'
+              role: secretary
+
+    - id: preset-advisor
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: advisor
+        name: 顾问
+        description: 只读顾问：检索记忆与任务板，产出建议
+        order: 31
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              complete: false
+              includeRuntimeContext: true
+              prefix: |
+                你是项目顾问。**只读**：可以检索记忆（memory_search / memory_brief / memory_recent）、
+                看任务板与约定，但**不能写**。你的产出是建议：用 submit_advice 提交，
+                写清问题、依据（引用检索到的事实）与推荐做法；采纳与否由用户决定。
+          - id: session-query
+            name: '@deepseek-ai/dsh-tool-session-query'
+          - id: office-tools
+            name: '@local/dsh-office/tools'
+            config:
+              dataDir: 'C:/Users/sakuay/.secretary-office'
+              role: advisor
+
+    - id: preset-gm
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: gm
+        name: 总经理
+        description: 只读：任务板与约定
+        order: 32
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              complete: false
+              includeRuntimeContext: true
+              prefix: |
+                你是总经理视角的只读角色：只能看任务板与项目约定，不做写入。
+                回答聚焦优先级、风险与阻塞项，引用任务板上的既有条目。
+          - id: office-tools
+            name: '@local/dsh-office/tools'
+            config:
+              dataDir: 'C:/Users/sakuay/.secretary-office'
+              role: gm
+
+    - id: preset-dm
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: dm
+        name: 部门经理
+        description: 只读：任务板与约定
+        order: 33
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              complete: false
+              includeRuntimeContext: true
+              prefix: |
+                你是部门经理视角的只读角色：只能看任务板与项目约定，不做写入。
+                回答聚焦本部门任务的进展、依赖与下一步。
+          - id: office-tools
+            name: '@local/dsh-office/tools'
+            config:
+              dataDir: 'C:/Users/sakuay/.secretary-office'
+              role: dm

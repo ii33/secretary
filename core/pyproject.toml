@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "secretary-core"
+version = "0.5.12-m6"
+description = "Project memory core for the executive secretary (M1–M4)"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+secretary-core = "secretary_core.cli:main"
+
+[tool.setuptools]
+packages = ["secretary_core"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+secretary_core = ["schema.sql"]

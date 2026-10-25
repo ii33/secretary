@@ -1,0 +1,47 @@
+# 任务面板
+goal: DSH rc.3 兼容检查完成（peer 已放宽）；更新安装受 app 锁定阻塞，需退出后台进程后手动安装。
+stage: 兼容检查完成 / 待安装验收
+- [x] #1 修复 turn 层幂等约束与 turn_no 生成 | 已加 ux_turn_session_seq 部分唯一索引；归一化按 session+seq 判重，turn_no 改为 MAX+1；test_events 通过。
+- [x] #2 软删 turn 时联动 note 为 source_deleted | 软删 turn 已联动关联 note 为 source_deleted，并写审计；默认 search/get 排除该状态；recycle/search 测试通过。
+- [x] #3 purge 同步清理 FTS rowid | purge turn/note 已同步删除 contentless FTS rowid；test_recycle 通过。
+- [x] #4 修正 purge --now / 到期清理语义（CLI+API） | 默认 purge 只清到期；--now / API now=true 强制清理所有软删记录；CLI 增加 --now；测试通过。
+- [x] #5 修复 serve 关闭时同线程 shutdown 死锁 | serve finally 已移除同线程 shutdown，仅 server_close + 清理 core.json；API/CLI 测试通过。
+- [x] #6 补充/更新单元测试与 acceptance 断言 | 已新增跨事件类型幂等、source_deleted、FTS 清理与 force purge 测试；acceptance 严格断言 20/20、export、purge。
+- [x] #7 全量测试与验收复跑，更新报告 | 全量 84 tests、强化 acceptance、编译检查均通过；README/v1-spec/审核报告已更新。
+- [x] #8 schema migration v2 + 迁移前备份 | 新增 turn.event_type；版本 1→2 自动迁移并备份到 backups/；test_db 通过。
+- [x] #9 文件日志与轮转 | logs/core.log + RotatingFileHandler；serve/ingest 错误落日志；test_logging 通过。
+- [x] #10 --include-deleted | search/get/recent + CLI/API 支持；删除数据可查；test_search/test_cli 通过。
+- [x] #11 工具限长对齐 | search max 5、snippet ≤160、recent 每条 ≤120、memory_get 包含 brief/report；测试通过。
+- [x] #12 backup 命令 | `secretary_core backup` 生成一致快照；CLI 测试通过。
+- [x] #13 评测文档复现口径 | 新增 contentless benchmark 脚本；bigram-evaluation 标注实测/合成/外推口径。
+- [x] #14 M1b bundle + Python locator | @local/dsh-office 已安装进 desktop profile；CoreManager 能定位 DSH Python 并启动核心。
+- [x] #15 session/event 采集 + sessionQuery 回填 | host 适配器 + turn 组装 + 回填；13 个 Node 测试通过。
+- [x] #16 5 工具 + secretary 预设 | @local/dsh-office/tools + preset-secretary 已声明；工具注册/执行测试通过。
+- [x] #18 修复仅 3 个工具的问题 | DSH register 要求 output.render；已补 render，并将 preset 行改为主包 mode:tools；15 Node 测试通过。另按 agent-preset/selected 处理会话中途切换预设（header 不会变），回填按切换点切段。
+- [x] #17 真实 ES 会话端到端 + 重启回填 | 冒烟通过：8 tools、5 real turns；T1/T2 回填与实时写入；raw_event=5、turn=5，无重复。
+- [x] #20 M2 规则压缩器 | 本地确定性提取 + dry-run/confirm；summary/note/brief/processed 状态；失败不降级；84 Python tests 通过。
+- [x] #21 M2 compress CLI/API + 检索 | `compress --dry-run/--confirm`；preview/POST API；summary 加入 FTS、`memory_get(S-...)`、stats。
+- [x] #22 M2 控制台 | 项目/brief/搜索/最近/压缩/归档/回收站/角色/建议/任务板；左侧栏独立主面板；同源 `/office-console/api` 代理；15 Node tests 通过。
+- [x] #24 修复控制台 404 | host 行 office-core 重新启用，路由延迟注册；projects/stats/roles/preview 均 200。
+- [x] #25 M3 冷层归档/读取/purge | 已压缩 turn 原文写 cold/<project>/T<id>.json.gz + cold_index；清空热字段/消息/FTS；memory_get 读回；purge 连带删冷文件；84 Python tests 通过。
+- [x] #26 M3 冷层 CLI/API/控制台 | `archive --project [--now]`、`POST /v1/archive`、控制台归档按钮。
+- [x] #27 M3 advisor 最小闭环 | 顾问预设：只读 memory + session-query transcript + submit_advice；独立 advice 表；控制台建议页；ES brief 一行。
+- [x] #29 M4 GM/部门/worker 预设 | ES `gm` → GM `dm` → DM `worker`；worker fs/run/sh/pwsh；maxDepth=3；适配器只收 secretary+gm turn。
+- [x] #35 ES 全局把控者定位 | 自动 brief 注入（≤400 字）；ES/GM/DM 挂 list_agents/send_message/interrupt_agent；persona 明确纠偏而非 fire-and-forget。
+- [x] #37 顾问建议由用户决定 | 顾问与用户直接对话，ES 不可见；pending/拒绝不进 ES；用户采纳只追加 `advice.accepted` hot turn（未压缩），不自动写 brief/note、不触发 compress；schema v5、API `/decision`、控制台采纳/不采纳。
+- [x] #38 任务板 | schema v9 `taskboard_item` 列表；长远/阶段/当前；用户点击编辑、达成、挂起、恢复、移除；ES taskboard_add/update/remove；顾问/GM/DM 只读，worker 不可见。
+- [x] #40 项目约定独立 | 独立 `convention_item`/tab/API；avoid/follow；可编辑/挂起/恢复/移除；ES convention_add/update/remove；顾问/GM/DM 只读。
+- [x] #42 agent 实例名 | `agent_name` 表（schema v10）；默认“预设名+序号”；控制台点击名字/改名保存；org 合并自定义名 + 会话标题；blank 会话过滤。
+- [x] #44 DSH rc.3 兼容检查 | 解包 pending app.asar 比对包/服务/配置；修正 peer 为 `>=0.2.1-rc.2 <0.2.2`；版本升 0.5.10；报告 `out/dsh-rc3-compatibility.md`。
+- [x] #43 项目预设隔离 | `project_preset` 表（schema v11）；角色 tab 项目草稿/已安装/全局分组；导入只写项目表，不自动进全局。
+- [x] #41 人员架构 + 预设 | 人员架构树（sessionQuery/sessionController）显示项目 agent、preset、running；节点查看 preset YAML、`uiWorkspace.openSession` 进入；角色 tab 项目/全局预设，导出 + 草稿导入。
+- [x] #39 梳理→压缩 | CLI/API/控制台主入口改 compress；规则压缩去掉寒暄/工具清单/重复，只留目标、决策、证据、未决；summarize 保留 alias。
+- [ ] #36 ES 全局把控/M4 真实验收 | 重启后建新 ES 会话，验证自动 brief、gm 下发、list_agents 监控、send_message 纠偏、DM/worker 不收录。
+- [x] #31 顾问 session_search 开启 + 控制台移出设置 | profile/bundle 覆盖 `session-query-sqlite` 为 durable path + first-search；客户端从 settings.section 改为 sidebar.panellist + main 面板。
+- [x] #33 P0 复审修复 | advice delivered 路由、effective preset 元数据、purge 级联 summary/note/artifact/FTS、v4 去重+唯一索引；84 Python/15 Node。
+- [x] #34 P1 复审修复 | 规则误报、kind 回退、remaining/scope、summary FTS JSON、事务内重读、advice brief 预留、回填 flush、webServer 重试、dataDir env、coreDir 相对化。
+- [ ] #32 session_search/侧栏面板验收 | 重启后在顾问会话重试 session_search（首次会建 session-search.db）；点左侧栏「秘书办公室」图标确认独立主面板。
+- [ ] #28 advisor 自动通知 | 当前只有 brief 一行，未做下一轮主动注入/未读提醒。
+- [x] #23 控制台视觉/交互确认 | 截图确认项目 dsh-team、2 turns/2 hot、brief、记忆/最近/压缩/回收站/角色 tab 与搜索框正常；M3 归档按钮已截图确认。
+- [ ] #19 20-turn soak + ES 主动调用 memory_search 观察 | 冒烟已证明管道；剩余为长时间稳定性与工具调用行为观察。
+
