@@ -1,0 +1,32 @@
+name: release
+
+# 推 v* 标签即自动创建 GitHub Release。
+# 说明优先取 release-notes/<tag>.md；没有就退回 GitHub 自动生成。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          notes="release-notes/${tag}.md"
+          if [ -f "$notes" ]; then
+            gh release create "$tag" --title "$tag" --notes-file "$notes" --verify-tag
+          else
+            gh release create "$tag" --title "$tag" --generate-notes --verify-tag
+          fi
