@@ -24,3 +24,6 @@ org-debug.json
 .DS_Store
 Thumbs.db
 *.log
+
+# Local test scratch
+.test-tmp/

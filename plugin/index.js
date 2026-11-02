@@ -1,16 +1,21 @@
+import { flatMembers } from './lib/flat-members.js'
 // DSH host adapter: wire session events into the secretary core.
 // Contract defined by plugin/test/host.test.mjs
 
 import { readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { mkdirSync } from 'node:fs'
 
 import { registerConsoleRoutes } from './lib/console-proxy.js'
 import { CoreManager } from './lib/core.js'
-import { projectForCwd } from './lib/project.js'
+import { projectForCwd, managedProjects, managedProjectsPath } from './lib/project.js'
 import { TurnBuffer, eventsToEnvelopes } from './lib/turns.js'
 
-const TARGET_PRESETS = ['secretary', 'gm']
+const BUILTIN_PRESETS = JSON.parse(readFileSync(new URL('./builtin-presets.json', import.meta.url), 'utf8'))
+
+const TARGET_PRESETS = ['es', 'secretary', 'gm']
 
 /**
  * DSH 把「已归档会话」记在 ~/.dsh/storages/workspace.json 的
@@ -58,13 +63,13 @@ function captureMode(depth, preset) {
   const known = preset || ''
   if (depth === undefined || depth === null) {
     // 没有深度信息：按预设兜底
-    if (known === 'secretary') return 'hot'
+    if ((known === 'es' || known === 'secretary')) return 'hot'
     if (known === 'gm') return 'cold'
     return 'skip'
   }
   if (depth <= 0) {
     // 顶层：只有 ES(secretary) 进热记忆；顾问、普通会话不收录
-    return known === 'secretary' ? 'hot' : 'skip'
+    return (known === 'es' || known === 'secretary') ? 'hot' : 'skip'
   }
   if (depth === 1) return 'cold'
   return 'skip'
@@ -165,12 +170,12 @@ function hasSessionContent(snapshot) {
  */
 async function buildOrgTree(ctx, project) {
   const sessionQuery = ctx.get('sessionQuery')
-  if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') return null
+  if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') throw new Error('DSH sessionQuery 服务尚未就绪，请稍后刷新')
   let sessions = []
   try {
     sessions = await sessionQuery.listSessions()
-  } catch {
-    return null
+  } catch (error) {
+    throw new Error('读取 DSH 会话列表失败：' + String(error))
   }
   const archivedIds = readArchivedSessionIds()
   const flat = []
@@ -178,11 +183,17 @@ async function buildOrgTree(ctx, project) {
     const header = (entry && entry.header) || entry || {}
     const id = header.id
     if (!id) continue
-    let snapshot = null
-    try {
-      snapshot = await sessionQuery.readSession(id)
-    } catch {
-      snapshot = null
+    // Filter the corpus by header before replaying any event log.
+    const headerCwd = header.cwd || header.identity?.cwd || ''
+    if (project && (!headerCwd || projectForCwd(headerCwd) !== project)) continue
+    if (isArchivedId(archivedIds,id) || header.archived === true || header.isArchived === true || header.archivedAt || header.state === 'archived') continue
+    // Organization uses immutable headers; never replay full conversation logs here.
+    let snapshot = {session:header,events:[]}
+    if (typeof sessionQuery.readTitle === 'function') {
+      try {
+        const title = await sessionQuery.readTitle(id)
+        if (title?.title) snapshot.events.push({type:'session/title',data:{title:title.title}})
+      } catch { /* A title failure does not hide the session. */ }
     }
     const session = (snapshot && snapshot.session) || {}
     // cwd / parent / depth 都在 session 首行里，字段名兼容多种写法。
@@ -210,10 +221,10 @@ async function buildOrgTree(ctx, project) {
     if (project && !cwd) continue
     if (project && projectForCwd(cwd) !== project) continue
     // 空会话（没有标题、也没有用户消息）不入树，避免一堆空白项。
-    if (!hasSessionContent(snapshot)) continue
+    // Newly created sessions are organization members even before the first message.
     flat.push({ id, title, preset, parent, depth, cwd })
   }
-  if (flat.length === 0) return null
+  if (flat.length === 0) return []
   const byId = new Map(flat.map((node) => [node.id, { ...node, children: [] }]))
   const roots = []
   for (const node of byId.values()) {
@@ -224,7 +235,7 @@ async function buildOrgTree(ctx, project) {
     }
   }
   // 顶层排序：ES(secretary) → 顾问(advisor) → 普通会话
-  const rank = (preset) => (preset === 'secretary' ? 0 : preset === 'advisor' ? 1 : 2)
+  const rank = (preset) => ((preset === 'es' || preset === 'secretary') ? 0 : preset === 'advisor' ? 1 : 2)
   roots.sort((a, b) => rank(a.preset) - rank(b.preset))
   for (const node of byId.values()) {
     if (node.children.length > 1) {
@@ -292,7 +303,7 @@ async function backfillHistory(ctx, manager) {
     for (const envelope of envelopes) {
       // 用该轮实际 preset 判断收录方式
       const mode = captureMode(depth, envelope.payload.preset)
-      if (mode === 'skip') continue
+      if (mode === 'skip' || !envelope.project) continue
       if (mode === 'cold') envelope.cold = true
       try {
         await manager.sendRawEvent(envelope)
@@ -305,8 +316,87 @@ async function backfillHistory(ctx, manager) {
 
 export function apply(ctx, options = {}) {
   const { coreDir, dataDir, python } = options
+  if (dataDir) process.env.SECRETARY_OFFICE_HOME = dataDir
   const manager = new CoreManager({ coreDir, dataDir, python })
+  const globalExportPath = join(dataDir || join(homedir(), '.secretary-office'), 'global-presets.json')
+  const exported = new Set()
+  try { for (const id of JSON.parse(readFileSync(globalExportPath, 'utf8'))) exported.add(id) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  const registrations = new Map()
+  let exportQueue = Promise.resolve()
+  const exportBuiltin = id => {
+    const job = exportQueue.then(async () => {
+      const definition = BUILTIN_PRESETS.find(p => p.id === id)
+      if (!definition) throw new Error('Unknown builtin preset: ' + id)
+      const registry = ctx.get('agentPresets')
+      if (!registry?.register || !registry?.list) throw new Error('DSH agentPresets service unavailable')
+      if (!registrations.has(id)) {
+        if ((await registry.list()).some(p=>p.id===id)) throw new Error('全局已有同名预设，未覆盖：' + id)
+        const dispose = await registry.register(definition)
+        const row = (await registry.list()).find(p=>p.id===id)
+        if (!row || row.broken) { await dispose(); throw new Error('预设加载失败：' + JSON.stringify(row?.broken)) }
+        try {
+          mkdirSync(resolve(globalExportPath, '..'), {recursive:true})
+          writeFileSync(globalExportPath, JSON.stringify([...new Set([...exported,id])]), 'utf8')
+        } catch (error) { await dispose(); throw error }
+        exported.add(id)
+        registrations.set(id,dispose)
+      }
+      return {id,installed:true}
+    })
+    exportQueue = job.catch(()=>{})
+    return job
+  }
+  ctx.inject(['agentPresets'], child => {
+    child.effect(() => {
+      let stopped = false
+      const ready = (async()=>{for (const id of exported) {if(stopped) break; try {await exportBuiltin(id)} catch(error) {ctx.logger?.warn?.(String(error))}}})()
+      return async()=>{stopped=true;await ready;await exportQueue;for(const dispose of registrations.values()) await dispose();registrations.clear()}
+    })
+  })
+  const syncFlatMembers = async project => {
+    const cfg = await manager.request('GET','/v1/organization?project='+encodeURIComponent(project))
+    if (cfg.mode !== 'flat') return cfg
+    const tree = await buildOrgTree(ctx,project)
+    if (tree === null) return cfg
+    const members = flatMembers(tree,cfg.members)
+    if (JSON.stringify(members) === JSON.stringify(cfg.members)) return cfg
+    return manager.request('POST','/v1/organization/sync',{project,members})
+  }
   const buffers = new Map()
+  ctx.effect(() => {
+    let stopped = false, polling = false
+    const tick = async () => {
+      if (stopped || polling) return
+      polling = true
+      try {
+        const controller = ctx.get('sessionController')
+        if (!controller?.prompt) return
+        for (const project of managedProjects()) await syncFlatMembers(project.id)
+        const pending = await manager.request('GET', '/v1/rounds/pending')
+        for (const activation of pending.items || []) {
+          if (stopped) break
+          const cfg = await manager.request('GET', '/v1/organization?project=' + encodeURIComponent(activation.project))
+          const member = cfg.members.find(m => m.id === activation.member)
+          if (!member) continue
+          try {
+            const inbox = await manager.request('GET', '/v1/member-messages?' + new URLSearchParams({project:activation.project,session_id:member.session_id}))
+            const messages = inbox.items || []
+            const content = '项目轮次 ' + activation.number + '\n成员：' + JSON.stringify(cfg.members.map(m => ({id:m.id,name:m.name,role:m.role,preset:m.preset}))) + '\n本轮任务：' + (activation.task || '处理收到的留言。') + (messages.length ? '\n未读留言：' + JSON.stringify(messages) : '')
+            await manager.request('POST','/v1/rounds/activation',{project:activation.project,round_id:activation.round_id,member:member.id,status:'dispatched'})
+            await controller.prompt({sessionId:member.session_id,requestId:'office-'+activation.round_id+'-'+member.id,mode:'followup',content:[{type:'text',text:content}]}, 'user-rpc')
+            // Acknowledge only messages included in this activation.
+            if (messages.length) await manager.request('POST','/v1/member-messages/ack',{project:activation.project,session_id:member.session_id,ids:messages.map(m=>m.id)})
+          } catch (error) {
+            await manager.request('POST','/v1/rounds/activation',{project:activation.project,round_id:activation.round_id,member:member.id,status:'failed',error:String(error)})
+          }
+        }
+      } catch (error) { ctx.logger?.warn?.('office rounds: ' + String(error)) }
+      finally { polling = false }
+    }
+    const timer = setInterval(tick, 2000)
+    timer.unref?.()
+    return () => { stopped = true; clearInterval(timer) }
+  })
 
   // 控制台 API：把 `/office-console/api/*` 白名单代理挂到宿主 webServer 上。
   // webServer 可能在插件加载后才就绪（历史问题是"只重试 5 次然后永久放弃"），
@@ -316,39 +406,48 @@ export function apply(ctx, options = {}) {
     let cancelled = false
     let timer
     const helpers = {
+      async workspaces() {
+        const registry = ctx.get('workspaceRegistry')
+        const rows = typeof registry?.list === 'function' ? await registry.list() : []
+        return {workspaces:rows.map(w=>({id:w.id,title:w.title||w.path,path:w.path})).filter(w=>w.path),projects:managedProjects()}
+      },
+      async manageWorkspace(body) {
+        const registry = ctx.get('workspaceRegistry')
+        const rows = typeof registry?.list === 'function' ? await registry.list() : []
+        const workspace = rows.find(w=>w.id===body.workspace_id)
+        if (!workspace?.path) throw new Error('请选择 DSH 中现有的工作区项目')
+        const path = resolve(workspace.path)
+        const projects = managedProjects()
+        let project = projects.find(p=>resolve(p.path).toLowerCase()===path.toLowerCase())
+        if (!project) {
+          project = {id:'workspace-'+createHash('sha256').update(path.toLowerCase()).digest('hex').slice(0,20),name:workspace.title||path,path,workspace_id:workspace.id}
+          await manager.request('POST','/v1/projects',{id:project.id})
+          projects.push(project)
+          mkdirSync(dataDir,{recursive:true})
+          writeFileSync(managedProjectsPath(),JSON.stringify({projects},null,2),'utf8')
+        }
+        return project
+      },
+      organization: syncFlatMembers,
       async org(project) {
-        try {
-          const tree = await buildOrgTree(ctx, project)
-          if (tree && tree.length > 0) {
-            dumpOrgDebug(project, tree)
-            return { roots: tree, nodes: [] }
-          }
-        } catch {
-          /* fall through to workspace fallback */
-        }
-        try {
-          const registry = ctx.get('workspaceRegistry')
-          const workspaces = typeof registry?.list === 'function' ? registry.list() : []
-          return {
-            roots: workspaces.map((item) => ({
-              id: item.id, title: item.title, path: item.path, preset: 'workspace', children: []
-            })),
-            nodes: []
-          }
-        } catch {
-          return { roots: [], nodes: [] }
-        }
+        const tree = await buildOrgTree(ctx, project)
+        return {roots:tree || [],nodes:[]}
       },
+      exportPreset: exportBuiltin,
       async presets() {
+        const builtins = BUILTIN_PRESETS.map(({id,name,description})=>({id,name,description,builtin:true,installed:true}))
         try {
-          const presets = ctx.get('agentPresets')
-          const rows = typeof presets?.list === 'function' ? await presets.list() : []
-          return { presets: rows.map((row) => ({ id: row.id, name: row.name, description: row.description })) }
-        } catch {
-          return { presets: [] }
+          const registry = ctx.get('agentPresets')
+          if (typeof registry?.list !== 'function') return {presets:builtins,globalPresets:[],error:'DSH agentPresets service unavailable'}
+          const globalPresets = await registry.list()
+          return {presets:builtins,globalPresets}
+        } catch (error) {
+          return {presets:builtins,globalPresets:[],error:String(error)}
         }
       },
-      async presetDocument(id) {
+      async presetDocument(id, source) {
+        const builtin = source !== "global" && BUILTIN_PRESETS.find(p=>p.id===id)
+        if (builtin) return {agentPreset:id,name:builtin.name,content:JSON.stringify(builtin.plugins,null,2)}
         try {
           const presets = ctx.get('agentPresets')
           const document = typeof presets?.readDocument === 'function' ? await presets.readDocument(id) : undefined
@@ -395,7 +494,8 @@ export function apply(ctx, options = {}) {
       text: (arg) => {
         const session = arg && arg.agent && arg.agent.session
         const cwd = session && session.header ? session.header.cwd : undefined
-        const project = cwd ? projectForCwd(cwd) : 'default'
+        const project = cwd ? projectForCwd(cwd) : null
+        if (!project) return ''
         // 缓存过期就顺手在后台刷新（同步函数里不能 await）。
         if (briefIsStale(project)) {
           refreshBrief(manager, project).catch(() => {})
@@ -424,7 +524,9 @@ export function apply(ctx, options = {}) {
         })
         buffers.set(session.id, buffer)
       }
+      if (!projectForCwd(header.cwd)) return
       const envelope = buffer.consume(event)
+      if (envelope) manager.request('POST','/v1/rounds/complete',{project:envelope.project,session_id:session.id}).catch(error=>ctx.logger?.warn?.(String(error)))
       if (!envelope) return
       // 用该轮实际 preset 判断（会话可能中途切换预设）
       const mode = captureMode(depth, envelope.payload.preset)

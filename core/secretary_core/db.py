@@ -116,8 +116,8 @@ def _audit(conn: sqlite3.Connection, actor: str, action: str,
         pass
 
 
-def list_audit(conn: sqlite3.Connection, limit: int = 50) -> list:
-    rows = conn.execute("SELECT * FROM audit ORDER BY at DESC LIMIT ?", (limit,)).fetchall()
+def list_audit(conn: sqlite3.Connection, limit: int = 50, project: str = "default") -> list:
+    rows = conn.execute("SELECT * FROM audit WHERE (ref_type='project' AND ref_id=?) OR (ref_type='turn' AND ref_id IN (SELECT CAST(id AS TEXT) FROM turns WHERE project=?)) ORDER BY at DESC LIMIT ?", (project, project, limit)).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -158,7 +158,7 @@ def ingest_raw_event(conn: sqlite3.Connection, data_dir: str, event: dict) -> di
         return {"status": "error", "error": str(exc)}
 
 
-def replay_raw_events(conn: sqlite3.Connection, data_dir: str, only_failed: bool = True) -> int:
+def replay_raw_events(conn: sqlite3.Connection, data_dir: str, only_failed: bool = True, project: str = "default") -> int:
     sql = "SELECT * FROM raw_event"
     if only_failed:
         sql += " WHERE error IS NOT NULL OR normalized_at IS NULL"
@@ -167,6 +167,8 @@ def replay_raw_events(conn: sqlite3.Connection, data_dir: str, only_failed: bool
     for row in rows:
         try:
             event = json.loads(row["payload"])
+            if event.get("project", "default") != project:
+                continue
         except (TypeError, ValueError):
             continue
         try:
@@ -362,8 +364,8 @@ def search_turns(conn, project: str, query: str, limit: int = 5) -> list:
     fts = _fts_query(tokens)
     try:
         rows = conn.execute(
-            "SELECT rowid FROM turn_fts WHERE turn_fts MATCH ? ORDER BY rank LIMIT 50",
-            (fts,),
+            "SELECT turn_fts.rowid FROM turn_fts JOIN turns t ON t.id=turn_fts.rowid WHERE turn_fts MATCH ? AND t.project=? AND t.deleted=0 AND t.state!='cold' ORDER BY rank LIMIT 50",
+            (fts, project),
         ).fetchall()
     except sqlite3.OperationalError:
         return _like_fallback(conn, project, query, limit)
@@ -406,8 +408,8 @@ def search_notes(conn, project: str, query: str, limit: int = 5) -> list:
     fts = _fts_query(tokens)
     try:
         rows = conn.execute(
-            "SELECT rowid FROM note_fts WHERE note_fts MATCH ? ORDER BY rank LIMIT 30",
-            (fts,),
+            "SELECT note_fts.rowid FROM note_fts JOIN notes n ON n.rowid=note_fts.rowid WHERE note_fts MATCH ? AND n.project=? AND n.deleted=0 AND n.status!='superseded' ORDER BY rank LIMIT 30",
+            (fts, project),
         ).fetchall()
     except sqlite3.OperationalError:
         return []
@@ -724,6 +726,10 @@ def set_advice_status(conn: sqlite3.Connection, advice_id: str, status: str) -> 
     row = conn.execute("SELECT * FROM advice WHERE id=?", (advice_id,)).fetchone()
     if not row:
         return None
+    if row["status"] in ("accepted", "rejected"):
+        return _advice_dict(row)
+    if status not in ("delivered", "accepted", "rejected"):
+        raise ValueError("invalid advice status")
     decided = now_ms() if status in ("accepted", "rejected") else None
     conn.execute(
         "UPDATE advice SET status=?, decided_at=COALESCE(?, decided_at) WHERE id=?",
@@ -733,7 +739,7 @@ def set_advice_status(conn: sqlite3.Connection, advice_id: str, status: str) -> 
         # An accepted recommendation becomes a durable turn so it shows up in
         # recent memory and search, mirroring the original behaviour.
         ts = now_ms()
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO turns (project, session, seq, role, preset, user_text,"
             " assistant_text, source, source_version, event_type, occurred_at, created_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -743,6 +749,7 @@ def set_advice_status(conn: sqlite3.Connection, advice_id: str, status: str) -> 
                 "advisor", "advisor", "advice.accepted", ts, ts,
             ),
         )
+        _index_row(conn, "turn_fts", cur.lastrowid, (row["subject"] or "") + " " + (row["recommendation"] or ""))
     conn.commit()
     updated = conn.execute("SELECT * FROM advice WHERE id=?", (advice_id,)).fetchone()
     return _advice_dict(updated) if updated else None
@@ -786,6 +793,18 @@ def purge(conn: sqlite3.Connection, data_dir: str, project: str, include_cold: b
     ).fetchall()
     count = 0
     for row in rows:
+        linked = conn.execute("SELECT summary_id FROM turns WHERE id=?", (row["id"],)).fetchone()
+        if linked and linked["summary_id"]:
+            sid = linked["summary_id"]
+            summary = conn.execute("SELECT rowid FROM summaries WHERE id=? AND project=?", (sid, project)).fetchone()
+            if summary:
+                _unindex_row(conn, "summary_fts", summary["rowid"])
+                conn.execute("DELETE FROM summaries WHERE id=? AND project=?", (sid, project))
+                conn.execute("DELETE FROM brief WHERE project=? AND summary_id=?", (project, sid))
+        for note in conn.execute("SELECT rowid FROM notes WHERE project=? AND source_turn_id=?", (project, row["id"])).fetchall():
+            _unindex_row(conn, "note_fts", note["rowid"])
+        conn.execute("DELETE FROM notes WHERE project=? AND source_turn_id=?", (project, row["id"]))
+        conn.execute("DELETE FROM artifact WHERE project=? AND source_turn=?", (project, row["id"]))
         if row["cold_ref"]:
             path = os.path.join(data_dir, row["cold_ref"])
             try:

@@ -1,0 +1,80 @@
+[
+  {
+    "id": "es",
+    "name": "执行秘书",
+    "description": "统筹项目、委派任务、验收结果和维护项目记忆",
+    "order": 30,
+    "plugins": [
+      {
+        "id": "persona",
+        "name": "@deepseek-ai/dsh-persona",
+        "config": {
+          "complete": false,
+          "includeRuntimeContext": true,
+          "prefix": "你是执行秘书 ES。掌握项目目标与约定，先查项目记忆再决策，委派任务并验收结果。维护任务板与项目约定。在扁平化架构中使用成员名单、留言和轮次工具；在树形结构中遵循既有层级。"
+        }
+      },
+      {
+        "id": "office-tools",
+        "name": "@local/dsh-office/tools",
+        "config": {
+          "coreDir": "C:/a/wk/addin/es/secretary/core",
+          "dataDir": "C:/Users/youai/.secretary-office",
+          "role": "es"
+        }
+      }
+    ]
+  },
+  {
+    "id": "gm",
+    "name": "总经理",
+    "description": "分解任务、协调执行、汇总报告",
+    "order": 31,
+    "plugins": [
+      {
+        "id": "persona",
+        "name": "@deepseek-ai/dsh-persona",
+        "config": {
+          "complete": false,
+          "includeRuntimeContext": true,
+          "prefix": "你是总经理 GM。依据执行秘书的目标分解任务，协调执行并汇总可验证的结果。遵守项目约定，按已配置架构工作；仅在扁平化架构使用留言。"
+        }
+      },
+      {
+        "id": "office-tools",
+        "name": "@local/dsh-office/tools",
+        "config": {
+          "coreDir": "C:/a/wk/addin/es/secretary/core",
+          "dataDir": "C:/Users/youai/.secretary-office",
+          "role": "gm"
+        }
+      }
+    ]
+  },
+  {
+    "id": "dm",
+    "name": "部门经理",
+    "description": "组织部门执行、核查结果并向上汇报",
+    "order": 32,
+    "plugins": [
+      {
+        "id": "persona",
+        "name": "@deepseek-ai/dsh-persona",
+        "config": {
+          "complete": false,
+          "includeRuntimeContext": true,
+          "prefix": "你是部门经理 DM。完成负责范围内的执行组织与结果核查，遵守项目约定并汇报进展、证据和阻塞。仅在扁平化架构使用留言。"
+        }
+      },
+      {
+        "id": "office-tools",
+        "name": "@local/dsh-office/tools",
+        "config": {
+          "coreDir": "C:/a/wk/addin/es/secretary/core",
+          "dataDir": "C:/Users/youai/.secretary-office",
+          "role": "dm"
+        }
+      }
+    ]
+  }
+]

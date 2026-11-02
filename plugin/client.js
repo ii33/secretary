@@ -89,7 +89,7 @@
         const TASK_STATUS = { open: '进行中', done: '已达成', suspended: '已挂起' }
         const CONV_STATUS = { active: '生效', suspended: '已挂起' }
         const PRESET_LABELS = {
-          secretary: '执行秘书', advisor: '顾问', gm: '总经理', dm: '部门经理',
+          es: '执行秘书', secretary: '执行秘书', advisor: '顾问', gm: '总经理', dm: '部门经理',
           worker: '执行员', generic: '普通会话', standard: '普通会话'
         }
 
@@ -118,11 +118,20 @@
           const [rules, setRules] = React.useState([])
           const [advice, setAdvice] = React.useState([])
           const [org, setOrg] = React.useState(null)
+          const [architectureDraft, setArchitectureDraft] = React.useState(null)
+          const [newProjectId, setNewProjectId] = React.useState('')
+          const [workspaceChoices,setWorkspaceChoices] = React.useState([])
+          const [roundLog, setRoundLog] = React.useState([])
+          const [roundTasks, setRoundTasks] = React.useState({})
+          const [inboxMember, setInboxMember] = React.useState('')
+          const [inboxMessages, setInboxMessages] = React.useState([])
           const [agentNames, setAgentNames] = React.useState({})
           const [editingAgent, setEditingAgent] = React.useState('')
           const [agentDraft, setAgentDraft] = React.useState('')
           const [collapsedNodes, setCollapsedNodes] = React.useState({})
           const [presets, setPresets] = React.useState([])
+          const [globalPresets, setGlobalPresets] = React.useState([])
+          const [presetError, setPresetError] = React.useState('')
           const [projectPresets, setProjectPresets] = React.useState([])
           const [importOpen, setImportOpen] = React.useState(false)
           const [exportContent, setExportContent] = React.useState('')
@@ -148,7 +157,8 @@
             setLoading(true)
             setError('')
             try {
-              const data = await getJSON(`${API}/projects`)
+              const data = await getJSON(`${API}/workspaces`)
+              setWorkspaceChoices(data.workspaces||[])
               const list = Array.isArray(data.projects) ? data.projects : []
               setProjects(list)
               setSelected((current) => (current === '' && list.length > 0 ? String(list[0].id) : current))
@@ -191,14 +201,23 @@
           }, [])
 
           React.useEffect(() => {
+            setArchitectureDraft(null)
+            setRoundLog([])
+            setRoundTasks({})
+            setInboxMember('')
+            setInboxMessages([])
+            setActiveTab('overview')
+            let cancelled = false
+            if(selected) getJSON(API+'/organization?project='+encodeURIComponent(selected)).then(cfg=>{if(!cancelled)setArchitectureDraft(cfg)}).catch(fail)
             reloadProject(selected)
+            return ()=>{cancelled=true}
           }, [selected, reloadProject])
 
           React.useEffect(() => {
-            if (activeTab === 'org' && selected !== '') {
+            if (['org','overview'].includes(activeTab) && selected !== '') {
               const p = encodeURIComponent(selected)
               Promise.all([
-                getJSON(`${API}/org?project=${p}`).catch(() => null),
+                getJSON(`${API}/org?project=${p}`).catch(error => ({roots:[],error:error.message})),
                 getJSON(`${API}/agent-names?project=${p}`).catch(() => ({ names: {} }))
               ]).then(([orgData, namesData]) => {
                 setOrg(orgData)
@@ -209,13 +228,22 @@
               const p = encodeURIComponent(selected)
               Promise.all([
                 getJSON(`${API}/project-presets?project=${p}`).catch(() => ({ items: [] })),
-                getJSON(`${API}/presets`).catch(() => ({ presets: [] }))
+                getJSON(`${API}/presets`).catch(error => ({ presets: [], error: String(error) }))
               ]).then(([pp, gp]) => {
                 setProjectPresets(Array.isArray(pp.items) ? pp.items : [])
                 setPresets(Array.isArray(gp.presets) ? gp.presets : [])
+                setPresetError(gp.error || '')
+                setGlobalPresets(gp.globalPresets || [])
               })
             }
           }, [activeTab, selected])
+
+          React.useEffect(()=>{
+            if(!selected || architectureDraft?.mode!=='flat') return
+            let stopped=false
+            const timer=setInterval(()=>{getJSON(API+'/organization?project='+encodeURIComponent(selected)).then(cfg=>{if(!stopped)setArchitectureDraft(cfg)}).catch(fail)},5000)
+            return ()=>{stopped=true;clearInterval(timer)}
+          },[selected,architectureDraft?.mode])
 
           const doSearch = React.useCallback(async () => {
             const keyword = query.trim()
@@ -286,7 +314,7 @@
 
           const decideAdvice = React.useCallback(async (id, decision) => {
             try {
-              await postJSON(`${API}/advice/${encodeURIComponent(id)}/decision`, { decision })
+              await postJSON(`${API}/advice/${encodeURIComponent(id)}/decision`, { project: selected, decision })
               await reloadProject(selected)
             } catch (problem) {
               fail(problem)
@@ -390,10 +418,10 @@
             setProjectPresets(Array.isArray(data.items) ? data.items : [])
           }, [selected])
 
-          const importPreset = React.useCallback(async (presetId) => {
+          const importPreset = React.useCallback(async (presetId, source = "global") => {
             if (selected === '') return
             try {
-              const doc = await getJSON(`${API}/presets/${encodeURIComponent(presetId)}`).catch(() => null)
+              const doc = await getJSON(`${API}/presets/${encodeURIComponent(presetId)}?source=${source}`)
               const content = doc && typeof doc.content === 'string' ? doc.content : ''
               await postJSON(`${API}/project-presets`, {
                 project: selected, id: presetId,
@@ -716,15 +744,18 @@
 
           function renderPresets() {
             return h('div', null,
+ h('h3',null,'插件内置预设（3）'),
+ ...['es','gm','dm'].map(id=>h('div',{key:id,style:cardStyle},h('strong',null,id+' — '+({es:'执行秘书',gm:'总经理',dm:'部门经理'}[id])),h('p',null,(()=>{const p=presets.find(p=>p.id===id);return !p?'状态尚未取得':p.broken?'加载失败：'+p.broken:p.builtin?'插件内置（私有）':p.installed?'已加载':'未注册'})()),h('button',{onClick:async()=>{try{await postJSON(API+'/presets/export',{id});setMessage(id+' 已导出到全局')}catch(error){fail(error)}}},'导出到全局'),h('button',{onClick:()=>importPreset(id,'builtin')},'复制到项目'))),
+ presetError?h('p',{role:'alert'},'预设读取失败：'+presetError):null,
               h('div', { style: rowStyle },
                 h('button', { type: 'button', style: buttonStyle, onClick: () => setImportOpen(!importOpen) }, importOpen ? '取消导入' : '从全局导入'),
                 h('span', { style: muted }, '项目预设默认不进全局，导出后可手动安装')),
               importOpen
                 ? h('div', { style: cardStyle },
                     h('div', { style: text }, '选择全局预设导入到本项目：'),
-                    presets.length === 0
+                    globalPresets.length === 0
                       ? h('p', { style: text }, '（没有全局预设）')
-                      : presets.map((preset) =>
+                      : globalPresets.map((preset) =>
                           h('div', { key: String(preset.id), style: rowStyle },
                             h('span', { style: text }, `${preset.id}${preset.name ? ' · ' + preset.name : ''}`),
                             h('button', { type: 'button', style: buttonStyle, onClick: () => importPreset(preset.id) }, '导入'))))
@@ -754,8 +785,9 @@
             )
           }
 
-          function renderOrg() {
+          function renderOrgTree() {
             if (!org) return h('p', { style: text }, '（暂无人员架构数据）')
+            if (org.error) return h('p', {role:'alert',style:text}, '会话读取失败：'+org.error)
             const roots = Array.isArray(org.roots) ? org.roots : []
             // 默认名：预设名 + 同预设序号（执行秘书1、总经理1…）
             const defaults = {}
@@ -861,13 +893,54 @@
                 )
           }
 
+          function renderOrg() {
+ const cfg=architectureDraft
+ if(!cfg)return h('p',null,'加载架构…')
+ const saveMode=async mode=>{try{await postJSON(API+'/organization',{project:selected,mode});const saved=await getJSON(API+'/organization?project='+encodeURIComponent(selected));setArchitectureDraft(saved);setActiveTab('overview');setMessage('架构已保存')}catch(error){fail(error)}}
+ return h('div',null,
+ h('h3',null,cfg.mode==='flat'?'自动识别的协作成员':'自动识别的人员层级'),
+ h('p',{style:muted},cfg.mode==='flat'?'主代理管理实际委派的成员，成员及预设从会话自动识别，无需手动添加。优先沿用已识别的主代理，其次识别唯一 ES 或唯一有委派的顶级会话；无关顶级会话不纳入协作组。':'ES、顾问和普通会话是用户发起的顶级会话；GM、DM 按 ES 实际委派关系自动展示，无需手动添加。'),
+ h('button',{onClick:async()=>{try{const data=await getJSON(API+'/organization?project='+encodeURIComponent(selected));setArchitectureDraft(data);const tree=await getJSON(API+'/org?project='+encodeURIComponent(selected));setOrg(tree)}catch(error){fail(error)}}},'刷新自动识别'),
+ h('button',{onClick:()=>saveMode(cfg.mode==='flat'?'tree':'flat')},cfg.mode==='flat'?'切换为树形架构':'切换为扁平化架构'),
+ cfg.mode==='flat'?renderFlatOverview():renderOrgTree())
+ }
+          const flat = architectureDraft?.project === selected && architectureDraft.mode === 'flat'
+          const panelTabs = flat
+            ? [['overview','协作总览'],['org','成员识别'],['rounds','轮次调度'],['messages','成员留言'],['taskboard','主代理任务板'],['presets','项目预设'],['conventions','项目约定'],['memory','项目记忆']]
+            : [['overview','层级总览'],['org','人员层级'],['presets','项目预设'],['taskboard','任务板'],['conventions','项目约定'],['memory','记忆管理'],['advice','顾问建议']]
+          function renderFlatOverview() {
+            const members = architectureDraft.members || []
+            return h('div',null,h('h3',null,'扁平化协作'),h('p',{style:muted},'主代理委派任务，子代理平行执行；有未读留言的成员可在下一轮激活。'),
+              h('div',{style:{display:'flex',gap:12,flexWrap:'wrap'}},members.map(m=>h('div',{key:m.id,style:cardStyle},
+                h('strong',null,m.name||m.id),h('p',null,m.role==='main'?'主代理':'子代理'),h('p',null,m.preset),
+                m.session_id?h('button',{onClick:()=>enterSession(m.session_id)},'打开会话'):h('span',null,'尚未绑定会话')))))
+          }
+          function renderRoundsPanel() {
+            const cfg=architectureDraft,main=cfg.members.find(m=>m.role==='main')
+            const refresh=async()=>{try{const data=await getJSON(API+'/rounds?project='+encodeURIComponent(selected));setRoundLog(data.items||[])}catch(error){fail(error)}}
+            return h('div',null,h('h3',null,'轮次调度'),
+              cfg.members.filter(m=>m.role!=='main').map(m=>h('div',{key:m.id,style:cardStyle},h('label',null,m.name||m.id,
+                h('textarea',{value:roundTasks[m.id]||'',placeholder:'本轮任务（留空则不委派）',onChange:e=>setRoundTasks({...roundTasks,[m.id]:e.target.value})})))),
+              h('button',{disabled:!main?.session_id,onClick:async()=>{try{await postJSON(API+'/rounds',{project:selected,session_id:main.session_id,assignments:Object.fromEntries(Object.entries(roundTasks).filter(([,text])=>text.trim()))});setRoundTasks({});await refresh()}catch(error){fail(error)}}},'由主代理发布本轮'),
+              h('button',{onClick:refresh},'刷新轮次'),roundLog.map(r=>h('div',{key:r.id,style:cardStyle},'第 '+r.number+' 轮 · '+r.status,
+                (r.activations||[]).map(a=>h('p',{key:a.member},a.member+' · '+a.status)))))
+          }
+          function renderMessagesPanel() {
+            return h('div',null,h('h3',null,'成员未读留言'),
+              h('select',{value:inboxMember,onChange:e=>{setInboxMember(e.target.value);setInboxMessages([])}},h('option',{value:''},'选择收件成员'),architectureDraft.members.map(m=>h('option',{key:m.id,value:m.session_id},m.name||m.id))),
+              h('button',{disabled:!inboxMember,onClick:async()=>{try{const data=await getJSON(API+'/member-messages?'+new URLSearchParams({project:selected,session_id:inboxMember}));setInboxMessages(data.items||[])}catch(error){fail(error)}}},'查看未读留言'),
+              h('p',{style:muted},'此处预览不会标记已读。代理激活时按未读留言处理。'),
+              inboxMessages.map(m=>h('div',{key:m.id,style:cardStyle},h('strong',null,m.sender),h('p',null,m.text))))
+          }
           const content =
-            activeTab === 'memory' ? renderMemory()
+            activeTab === 'org' ? renderOrg()
+            : !architectureDraft || architectureDraft.project !== selected ? h('p',null,'正在读取项目架构…')
+            : activeTab === 'memory' ? renderMemory()
             : activeTab === 'presets' ? renderPresets()
-            : activeTab === 'org' ? renderOrg()
-            : activeTab === 'advice' ? renderAdvice()
             : activeTab === 'taskboard' ? renderTaskboard()
-            : renderConventions()
+            : activeTab === 'conventions' ? renderConventions()
+            : flat ? activeTab === 'rounds' ? renderRoundsPanel() : activeTab === 'messages' ? renderMessagesPanel() : renderFlatOverview()
+            : activeTab === 'advice' ? renderAdvice() : renderOrgTree()
 
           return h('div', { className: 'office-console', style: { padding: '12px 16px', fontSize: 13, overflow: 'auto', height: '100%' } },
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
@@ -878,19 +951,22 @@
                     value: selected,
                     onChange: (event) => setSelected(event.target.value),
                     style: { font: 'inherit', fontSize: 12, padding: '2px 6px', borderRadius: 4, border: '1px solid rgba(128,128,128,0.3)', background: 'transparent', color: 'inherit' }
-                  }, projects.map((item) => h('option', { key: String(item.id), value: String(item.id) }, `${item.id}（${item.turns || 0}）`))),
+                  }, projects.map((item) => h('option', { key: String(item.id), value: String(item.id) }, item.name||item.id))),
+              h('select',{value:newProjectId,onChange:e=>setNewProjectId(e.target.value)},h('option',{value:''},'选择工作区项目'),workspaceChoices.map(w=>h('option',{key:w.id,value:w.id},w.title+' — '+w.path))),
+              h('button',{onClick:async()=>{try{const added=await postJSON(API+'/managed-projects',{workspace_id:newProjectId});await loadProjects();setSelected(added.id);setActiveTab('org');setNewProjectId('')}catch(e){fail(e)}}},'纳入管理'),
+              h('button',{onClick:()=>setActiveTab('org')},'项目架构'),
               h('button', { type: 'button', onClick: () => loadProjects(), style: buttonStyle }, loading ? '刷新中…' : '刷新')
             ),
             error === '' ? null : h('p', { style: { ...text, color: '#d9534f' } }, `加载失败：${error}`),
             message === '' ? null : h('p', { style: text }, message),
             h('div', { style: { display: 'flex', gap: 4, marginTop: 12, borderBottom: '1px solid rgba(128,128,128,0.35)' } },
-              TABS.map(([id, label]) => h('button', {
+              panelTabs.map(([id, label]) => h('button', {
                 key: id, type: 'button', onClick: () => setActiveTab(id),
                 'data-active': activeTab === id ? 'true' : 'false',
                 style: { ...tabButtonStyle, ...(activeTab === id ? activeTabStyle : { opacity: 0.72 }) }
               }, label))
             ),
-            h('div', { style: { marginTop: 10 } }, content),
+            h('div', { key: selected + (flat ? ':flat' : ':tree'), className: flat ? 'office-flat-panel' : 'office-tree-panel', style: { marginTop: 10, borderLeft: flat ? '3px solid #498b88' : '3px solid #6979a8', paddingLeft: 12 } }, h('h2', {style:{fontSize:15}}, flat ? '扁平化协作办公室' : '树形组织办公室'), content),
             h('p', { style: { ...muted, marginTop: 16, fontSize: 11 } }, '数据来源：/office-console/api（宿主白名单代理 → secretary-core）')
           )
         }

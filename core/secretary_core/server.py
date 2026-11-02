@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from urllib.parse import parse_qs, urlparse
 
-from . import compress, db
+from . import compress, db, organization
 
 
 def setup_logging(data_dir: str) -> logging.Logger:
@@ -50,6 +50,8 @@ class CoreServer:
         self.data_dir = data_dir
         self.logger = setup_logging(data_dir)
         self.conn = db.connect(data_dir)
+        organization.setup(self.conn)
+        self.request_lock = threading.RLock()
         self.httpd: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
 
@@ -83,6 +85,7 @@ class CoreServer:
             pass
 
     def _make_handler(self):
+        request_lock = self.request_lock
         conn = self.conn
         data_dir = self.data_dir
         logger = self.logger
@@ -129,13 +132,81 @@ class CoreServer:
                 query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
                 body = self._read_json() if method in ("POST", "PUT") else {}
                 try:
-                    status, payload = self._dispatch(method, parsed.path, query, body)
+                    with request_lock:
+                        try:
+                            status, payload = self._dispatch(method, parsed.path, query, body)
+                        except Exception:
+                            conn.rollback()
+                            raise
                 except Exception as exc:  # keep the server alive on handler errors
                     logger.exception("dispatch failed: %s %s", method, parsed.path)
                     status, payload = 500, {"error": str(exc)}
                 self._send(status, payload)
 
             def _dispatch(self, method: str, path: str, query: dict, body: dict):
+                project = body.get("project", query.get("project", "default"))
+                if path == '/v1/projects' and method == 'POST':
+                    ident = body.get('id', '').strip()
+                    if not ident or len(ident)>120 or any(c in ident for c in '/\\:') or ident in ('.','..'):
+                        return 400, {'error':'invalid project id'}
+                    conn.execute("INSERT OR IGNORE INTO organization(project,mode,members) VALUES (?,'tree','[]')",(ident,))
+                    conn.commit()
+                    return 200, organization.config(conn,ident)
+                if path == '/v1/organization/sync' and method == 'POST':
+                    return 200, organization.sync_members(conn, project, body.get('members', []))
+                if path == '/v1/organization':
+                    if method == 'GET':
+                        return 200, organization.config(conn, project)
+                    if method == 'POST':
+                        return 200, organization.configure(conn, project, body.get('mode'), body.get('members', []))
+                if path.startswith('/v1/member-messages') and organization.config(conn,project)['mode'] != 'flat':
+                    return 403, {'error':'messaging is available only in flat architecture'}
+                if path == '/v1/member-messages':
+                    if method == 'GET':
+                        return 200, {'items': organization.inbox(conn, project, query.get('session_id'), query.get('unread', '1') != '0')}
+                    if method == 'POST':
+                        return 200, organization.send(conn, project, body.get('session_id'), body.get('recipient'), body.get('text'))
+                if path == '/v1/member-messages/ack' and method == 'POST':
+                    actor = organization.member(conn,project,body.get('session_id'))
+                    if not actor:
+                        return 403, {'error':'not a member'}
+                    conn.executemany('UPDATE member_message SET read_at=? WHERE project=? AND recipient=? AND id=?',[(db.now_ms(),project,actor['id'],ident) for ident in body.get('ids',[])])
+                    conn.commit()
+                    return 200, {'status':'ok'}
+                if path == '/v1/member-messages/read' and method == 'POST':
+                    return 200, {'items': organization.inbox(conn, project, body.get('session_id'), True, True)}
+                if path == '/v1/rounds/pending' and method == 'GET':
+                    return 200, {'items': organization.pending(conn)}
+                if path == '/v1/rounds/activation' and method == 'POST':
+                    return 200, organization.activation_status(conn,project,body.get('round_id'),body.get('member'),body.get('status'),body.get('error'))
+                if path == '/v1/rounds/complete' and method == 'POST':
+                    organization.complete_session(conn,project,body.get('session_id'))
+                    return 200, {'status':'ok'}
+                if path == '/v1/rounds' and method == 'GET':
+                    return 200, {'items': organization.rounds(conn,project)}
+                if path == '/v1/taskboard' or path.startswith('/v1/taskboard/'):
+                    session = body.get('session_id', query.get('session_id'))
+                    if session and organization.config(conn,project)['mode'] == 'flat':
+                        actor = organization.member(conn,project,session)
+                        if not actor or actor['role'] != 'main':
+                            return 403, {'error':'taskboard is visible only to the main member'}
+                if path == '/v1/rounds' and method == 'POST':
+                    return 200, organization.start_round(conn, project, body.get('session_id'), body.get('assignments', {}))
+                table = None
+                ident = None
+                for prefix, candidate in (("/v1/taskboard", "taskboard"), ("/v1/conventions", "conventions"), ("/v1/advice", "advice"), ("/v1/notes", "notes")):
+                    if path.startswith(prefix + "/"):
+                        table, ident = candidate, path[len(prefix) + 1:].split("/")[0]
+                    elif path == prefix and body.get("id"):
+                        table, ident = candidate, body["id"]
+                if table and ident:
+                    if not conn.execute("SELECT 1 FROM " + table + " WHERE id=? AND project=?", (ident, project)).fetchone():
+                        return 404, {"error": "not found"}
+                for key, target in (("source_turn_id", "turns"), ("source_turn", "turns"), ("superseded_by", "notes")):
+                    if body.get(key) is not None:
+                        if not conn.execute("SELECT 1 FROM " + target + " WHERE id=? AND project=?", (body[key], project)).fetchone():
+                            return 404, {"error": "not found"}
+
                 if method == "POST" and path == "/v1/events":
                     if body.get("cold"):
                         return 200, db.insert_cold_turn(conn, data_dir, body)
@@ -147,7 +218,7 @@ class CoreServer:
                 if method == "POST" and path == "/v1/raw-events/replay":
                     return 200, {
                         "replayed": db.replay_raw_events(
-                            conn, data_dir, bool(body.get("only_failed", True))
+                            conn, data_dir, bool(body.get("only_failed", True)), project
                         )
                     }
 
@@ -162,7 +233,10 @@ class CoreServer:
                     return 200, {"results": results}
 
                 if method == "GET" and path == "/v1/projects":
-                    return 200, {"projects": db.list_projects(conn)}
+                    projects = {p['id']:p for p in db.list_projects(conn)}
+                    for row in conn.execute('SELECT project FROM organization'):
+                        projects.setdefault(row['project'], {'id':row['project'],'turns':0})
+                    return 200, {'projects':list(projects.values())}
 
                 if method == "GET" and path in ("/v1/summarize/preview", "/v1/compress/preview"):
                     return 200, compress.preview(
@@ -259,7 +333,7 @@ class CoreServer:
                     return 200, db.stats(conn, query.get("project", "default"))
 
                 if method == "GET" and path == "/v1/audit":
-                    return 200, {"items": db.list_audit(conn, int(query.get("limit", 50)))}
+                    return 200, {"items": db.list_audit(conn, int(query.get("limit", 50)), project)}
 
                 if path == "/v1/artifacts":
                     if method == "GET":
@@ -318,6 +392,9 @@ class CoreServer:
                 if method == "GET" and path.startswith("/v1/get/"):
                     ident = path[len("/v1/get/"):]
                     payload = None
+                    owned = any(conn.execute("SELECT 1 FROM " + table + " WHERE id=? AND project=?" + (" AND deleted=0" if table in ("turns", "notes") else ""), (ident, project)).fetchone() for table in ("turns", "notes", "summaries", "advice"))
+                    if not owned:
+                        return 404, {"error": "not found"}
                     note = db.get_note(conn, ident)
                     if note:
                         payload = note

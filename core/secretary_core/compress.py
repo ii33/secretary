@@ -177,11 +177,12 @@ def apply(conn, project: str, batch: int) -> dict:
         ).fetchone()
         if duplicate:
             continue
-        conn.execute(
+        note_row = conn.execute(
             "INSERT INTO notes (id, project, kind, text, source_turn_id, created_at)"
             " VALUES (?,?,?,?,?,?)",
             (db.new_id("N"), project, item["kind"], item["text"], item["source_turn_id"], stamp),
         )
+        db._index_row(conn, "note_fts", note_row.lastrowid, item["text"])
         written += 1
 
     # 没有可提取条目时不覆盖已有简报（否则会把上一轮的成果清空）。

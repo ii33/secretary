@@ -1,29 +1,29 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 import test from 'node:test'
+import {projectForCwd} from '../lib/project.js'
 
-import { projectForCwd, readProjectConfig } from '../lib/project.js'
-
-test('reads .dsh/office.json', () => {
-  const root = mkdtempSync(join(tmpdir(), 'office-project-'))
-  try {
-    mkdirSync(join(root, '.dsh'), { recursive: true })
-    writeFileSync(join(root, '.dsh', 'office.json'), JSON.stringify({ project: 'coating-sim' }), 'utf8')
-    assert.equal(projectForCwd(root), 'coating-sim')
-    assert.equal(readProjectConfig(root).source, 'office.json')
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+test('only explicitly managed workspaces resolve, including their subdirectories',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'office-project-'))
+ const previous=process.env.SECRETARY_OFFICE_HOME
+ try {
+  process.env.SECRETARY_OFFICE_HOME=dir
+  const workspace=join(dir,'workspace')
+  mkdirSync(join(workspace,'.dsh'),{recursive:true})
+  writeFileSync(join(workspace,'.dsh','office.json'),JSON.stringify({project:'legacy-name'}))
+  assert.equal(projectForCwd(workspace),null)
+  writeFileSync(join(dir,'managed-projects.json'),JSON.stringify({projects:[{id:'managed',path:workspace}]}))
+  assert.equal(projectForCwd(workspace),'managed')
+  assert.equal(projectForCwd(join(workspace,'src')),'managed')
+  assert.equal(projectForCwd(join(dir,'workspace-other')),null)
+ } finally {
+  if(previous===undefined)delete process.env.SECRETARY_OFFICE_HOME;else process.env.SECRETARY_OFFICE_HOME=previous
+  rmSync(dir,{recursive:true,force:true})
+ }
 })
-
-test('falls back to basename', () => {
-  const root = mkdtempSync(join(tmpdir(), 'office-project-'))
-  try {
-    const name = root.split(/[\\/]/u).pop()
-    assert.equal(projectForCwd(root), name.replace(/[^A-Za-z0-9._-]+/gu, '-'))
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+test('unknown and missing working directories are not managed',()=>{
+ assert.equal(projectForCwd(),null)
+ assert.equal(projectForCwd(join(tmpdir(),'unmanaged-office-project')),null)
 })

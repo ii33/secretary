@@ -2,7 +2,8 @@
 // Contract defined by plugin/test/project.test.mjs
 
 import { existsSync, readFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, join, resolve, relative, isAbsolute } from 'node:path'
+import { homedir } from 'node:os'
 
 const PROJECT_ID_SAFE = /[^A-Za-z0-9._-]+/gu
 
@@ -25,6 +26,15 @@ export function readProjectConfig(cwd) {
   return { project: sanitizeProjectName(basename(cwd)), source: 'basename', path: null }
 }
 
+export function managedProjectsPath() {
+  return join(process.env.SECRETARY_OFFICE_HOME || join(homedir(), '.secretary-office'), 'managed-projects.json')
+}
+export function managedProjects() {
+  try { return JSON.parse(readFileSync(managedProjectsPath(), 'utf8')).projects || [] } catch { return [] }
+}
 export function projectForCwd(cwd) {
-  return readProjectConfig(cwd).project
+  if (!cwd) return null
+  const matches = managedProjects().filter(p => { const rel = relative(resolve(p.path), resolve(cwd)); return rel === '' || (rel !== '..' && !rel.startsWith('..\\') && !rel.startsWith('../') && !isAbsolute(rel)) })
+  matches.sort((a,b)=>b.path.length-a.path.length)
+  return matches[0]?.id || null
 }

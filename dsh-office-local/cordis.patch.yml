@@ -1,0 +1,15 @@
+[
+  {
+    "insert": [
+      {
+        "id": "office-core",
+        "name": "@local/dsh-office",
+        "config": {
+          "coreDir": "C:/a/wk/addin/es/secretary/core",
+          "dataDir": "C:/Users/youai/.secretary-office",
+          "python": "C:/Users/youai/AppData/Local/Python/pythoncore-3.14-64/python.exe"
+        }
+      }
+    ]
+  }
+]

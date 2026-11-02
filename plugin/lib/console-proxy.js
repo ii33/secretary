@@ -31,6 +31,13 @@ export function registerConsoleRoutes(webServer, manager, helpers = {}) {
       try {
         const body = method === 'POST' ? await readBody(req) : undefined
 
+        if (sub === '/workspaces' && method === 'GET') return send(res,200,await helpers.workspaces())
+        if (sub === '/managed-projects' && method === 'POST') return send(res,200,await helpers.manageWorkspace(body))
+        if (sub === '/organization' && method === 'GET' && helpers.organization) return send(res,200,await helpers.organization(url.searchParams.get('project')))
+        if (['/organization', '/rounds', '/member-messages'].includes(sub) && ['GET', 'POST'].includes(method)) {
+          return send(res, 200, await manager.request(method, '/v1' + sub + query, sub === '/organization' && method === 'POST' ? {...body,members:[]} : body))
+        }
+        if (sub === '/projects' && method === 'POST') return send(res,200,await manager.request('POST','/v1/projects',body))
         if (sub === '/projects' && method === 'GET') {
           return send(res, 200, await manager.request('GET', '/v1/projects'))
         }
@@ -52,13 +59,13 @@ export function registerConsoleRoutes(webServer, manager, helpers = {}) {
         const getMatch = sub.match(/^\/get\/(.+)$/)
         if (getMatch && method === 'GET') {
           const id = encodeURIComponent(decodeURIComponent(getMatch[1]))
-          return send(res, 200, await manager.request('GET', `/v1/get/${id}`))
+          return send(res, 200, await manager.request('GET', `/v1/get/${id}${query}`))
         }
 
         const noteMatch = sub.match(/^\/notes\/(.+)$/)
         if (noteMatch && method === 'GET') {
           const id = encodeURIComponent(decodeURIComponent(noteMatch[1]))
-          return send(res, 200, await manager.request('GET', `/v1/notes/${id}`))
+          return send(res, 200, await manager.request('GET', `/v1/notes/${id}${query}`))
         }
 
         if (sub === '/org' && method === 'GET') {
@@ -73,10 +80,14 @@ export function registerConsoleRoutes(webServer, manager, helpers = {}) {
           return send(res, 200, payload)
         }
 
+        if (sub === '/presets/export' && method === 'POST') {
+          return send(res,200,await helpers.exportPreset(body.id))
+        }
+
         const presetMatch = sub.match(/^\/presets\/(.+)$/)
         if (presetMatch && method === 'GET') {
           const payload = helpers.presetDocument
-            ? await helpers.presetDocument(decodeURIComponent(presetMatch[1]))
+            ? await helpers.presetDocument(decodeURIComponent(presetMatch[1]), url.searchParams.get('source'))
             : { agentPreset: decodeURIComponent(presetMatch[1]) }
           return send(res, 200, payload)
         }
@@ -136,7 +147,7 @@ export function registerConsoleRoutes(webServer, manager, helpers = {}) {
           return send(
             res,
             200,
-            await manager.request('DELETE', `/v1/taskboard/${encodeURIComponent(taskMatch[1])}`)
+            await manager.request('DELETE', `/v1/taskboard/${encodeURIComponent(taskMatch[1])}${query}`)
           )
         }
 
@@ -154,7 +165,7 @@ export function registerConsoleRoutes(webServer, manager, helpers = {}) {
           return send(
             res,
             200,
-            await manager.request('DELETE', `/v1/conventions/${encodeURIComponent(conventionMatch[1])}`)
+            await manager.request('DELETE', `/v1/conventions/${encodeURIComponent(conventionMatch[1])}${query}`)
           )
         }
 

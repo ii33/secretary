@@ -1,6 +1,7 @@
 // Tool registration for the secretary / advisor / gm / dm roles.
 // Contract defined by plugin/test/tools.test.mjs
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { CoreClient } from './lib/client.js'
 import { projectForCwd } from './lib/project.js'
 
@@ -13,6 +14,7 @@ const FULL_TOOLS = [
 const READONLY_TOOLS = ['taskboard_read', 'convention_read']
 
 const ROLE_TOOLS = {
+  es: FULL_TOOLS,
   secretary: FULL_TOOLS,
   advisor: ['memory_search', 'memory_brief', 'memory_recent', 'taskboard_read', 'convention_read', 'submit_advice'],
   gm: READONLY_TOOLS,
@@ -23,7 +25,9 @@ function projectOf(exec) {
   const cwd = exec && exec.agent && exec.agent.session && exec.agent.session.header
     ? exec.agent.session.header.cwd
     : undefined
-  return cwd ? projectForCwd(cwd) : 'default'
+  const project = cwd ? projectForCwd(cwd) : null
+  if (!project) throw new Error('当前工作区尚未纳入秘书办公室管理，请先在插件中选择项目并点击纳入管理')
+  return project
 }
 
 function query(params) {
@@ -39,10 +43,21 @@ function render(result) {
   return JSON.stringify(result, null, 2)
 }
 
+const execution = new AsyncLocalStorage()
 function buildDefinitions(client) {
-  const call = (method, path, body) => client.request(method, path, body)
+  const call = (method, path, body) => {
+    const exec = execution.getStore()
+    const session = exec?.agent?.session?.id
+    if (method === 'GET' || method === 'DELETE') path += (path.includes('?') ? '&' : '?') + query({ session_id: session })
+    else body = { ...body, session_id: session }
+    return client.request(method, path, body)
+  }
 
   return {
+    office_members: {name:'office_members',description:'List this project architecture and member IDs.',output:{render},execute:(args,exec)=>call('GET','/v1/organization?'+query({project:projectOf(exec)}))},
+    office_message: {name:'office_message',description:'Leave a message for a member in this project. recipient is a member ID.',output:{render},execute:(args,exec)=>call('POST','/v1/member-messages',{project:projectOf(exec),recipient:args.recipient,text:args.text})},
+    office_inbox: {name:'office_inbox',description:'Read and mark your unread project messages. Defaults to unread only.',output:{render},execute:(args,exec)=>call('POST','/v1/member-messages/read',{project:projectOf(exec)})},
+    office_round: {name:'office_round',description:'Main member: release a round with assignments mapping child member IDs to tasks. Members with unread messages also activate.',output:{render},execute:(args,exec)=>call('POST','/v1/rounds',{project:projectOf(exec),assignments:args.assignments||{}})},
     memory_search: {
       name: 'memory_search',
       description: 'Search project memory turns.',
@@ -53,7 +68,7 @@ function buildDefinitions(client) {
       name: 'memory_get',
       description: 'Fetch a memory note, summary, or advice by id.',
       output: { render },
-      execute: (args) => call('GET', `/v1/get/${encodeURIComponent(args.id)}`)
+      execute: (args, exec) => call('GET', `/v1/get/${encodeURIComponent(args.id)}?${query({ project: projectOf(exec) })}`)
     },
     memory_recent: {
       name: 'memory_recent',
@@ -102,7 +117,7 @@ function buildDefinitions(client) {
       name: 'taskboard_remove',
       description: 'Remove a task from the board.',
       output: { render },
-      execute: (args) => call('DELETE', `/v1/taskboard/${encodeURIComponent(args.id)}`)
+      execute: (args, exec) => call('DELETE', `/v1/taskboard/${encodeURIComponent(args.id)}?${query({ project: projectOf(exec) })}`)
     },
     convention_read: {
       name: 'convention_read',
@@ -131,7 +146,7 @@ function buildDefinitions(client) {
       name: 'convention_remove',
       description: 'Remove a convention.',
       output: { render },
-      execute: (args) => call('DELETE', `/v1/conventions/${encodeURIComponent(args.id)}`)
+      execute: (args, exec) => call('DELETE', `/v1/conventions/${encodeURIComponent(args.id)}?${query({ project: projectOf(exec) })}`)
     },
     submit_advice: {
       name: 'submit_advice',
@@ -145,15 +160,20 @@ function buildDefinitions(client) {
   }
 }
 
+export const inject = ['tools']
+export const name = 'office-tools'
 export function apply(ctx, options = {}) {
-  const { dataDir, coreDir, role = 'secretary' } = options
+  const { dataDir, coreDir, role = 'es' } = options
   const client = new CoreClient({ dataDir, coreDir })
   const definitions = buildDefinitions(client)
-  const names = ROLE_TOOLS[role] || ROLE_TOOLS.secretary
+  const names = [...(ROLE_TOOLS[role] || ROLE_TOOLS.secretary), 'office_members', 'office_message', 'office_inbox', 'office_round']
   for (const name of names) {
     const definition = definitions[name]
-    if (definition) ctx.tools.register(definition)
+    const fields = {query:'string',limit:'integer',id:'string',n:'integer',kind:'string',text:'string',section:'string',title:'string',detail:'string',status:'string',actor:'string',subject:'string',recommendation:'string',evidence:'string',recipient:'string'}
+    const parameters = Object.fromEntries(Object.entries(fields).map(([key,type])=>[key,{type,description:key}]))
+    parameters.assignments = {type:'object',additionalProperties:true,properties:{},description:'Member ID to task text'}
+    if (definition) ctx.tools.register({ ...definition, parameters:{type:'object',properties:parameters,additionalProperties:false}, output:{schema:{},render:(_args,value)=>[{type:'text',text:render(value)}]}, execute: (args, exec) => execution.run(exec, async () => { if (name.startsWith("office_")) { const cfg = await client.request("GET", "/v1/organization?" + query({project:projectOf(exec)})); if (cfg.mode !== "flat") throw new Error("Member messaging and rounds require flat architecture"); } return definition.execute(args, exec) }) })
   }
 }
 
-export default { apply }
+export default { apply, inject, name }
